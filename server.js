@@ -1,9 +1,11 @@
-﻿'use strict';
+'use strict';
 const http = require('node:http');
 const fs = require('node:fs');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
 const password = process.env.SITE_PASSWORD || '';
+const username = process.env.SITE_USERNAME || 'wan';
+if (username.includes(':') || /[\r\n]/.test(username)) { console.error('SITE_USERNAME must not contain colons or line breaks.'); process.exit(1); }
 if (password.length < 16) { console.error('SITE_PASSWORD must be set to at least 16 characters.'); process.exit(1); }
 const html = fs.readFileSync(require('node:path').join(__dirname, 'index.html'));
 const maxImage = 20 * 1024 * 1024;
@@ -17,7 +19,7 @@ function authenticated(req) {
     if (!req.headers.authorization?.startsWith('Basic ')) return false;
     const [user, ...parts] = Buffer.from(req.headers.authorization.slice(6), 'base64').toString('utf8').split(':');
     const candidate = Buffer.from(parts.join(':')); const expected = Buffer.from(password);
-    return user === 'wan' && candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+    return user === username && candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
   } catch { return false; }
 }
 function readBody(req, max) {
@@ -47,14 +49,15 @@ const server = http.createServer(async (req, res) => {
     attempts.delete(ip);
     const path = new URL(req.url, 'http://localhost').pathname;
     if (req.method === 'GET' && (path === '/' || path === '/index.html')) return send(res, 200, html, 'text/html; charset=utf-8');
-    if (req.method === 'GET' && path === '/health') return send(res, 200, {service:'wan-studio', upload:true});
+    if (req.method === 'GET' && path === '/health') return send(res, 200, {service:'wan-studio', upload:true, image_edit:true});
     if (req.method !== 'POST' || !sameOrigin(req)) return send(res, 403, {error:'Forbidden'});
     if (path === '/api') {
       const request = JSON.parse((await readBody(req, 100000)).toString('utf8')); const key = request.key;
       if (typeof key !== 'string' || !key || /[\r\n]/.test(key)) return send(res, 400, {error:'Invalid API key'});
       let result;
-      if (request.action === 'generate' && request.payload && typeof request.payload === 'object') {
-        result = await atlas('/api/v1/model/generateVideo', key, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request.payload)});
+      if ((request.action === 'generate' || request.action === 'generateImage') && request.payload && typeof request.payload === 'object') {
+        const endpoint = request.action === 'generateImage' ? '/api/v1/model/generateImage' : '/api/v1/model/generateVideo';
+        result = await atlas(endpoint, key, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(request.payload)});
       } else if (request.action === 'poll' && /^[A-Za-z0-9_-]{1,200}$/.test(request.id || '')) {
         result = await atlas('/api/v1/model/prediction/' + request.id, key);
       } else return send(res, 400, {error:'Invalid request'});
